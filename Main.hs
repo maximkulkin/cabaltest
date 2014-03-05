@@ -1,12 +1,13 @@
 {-# LANGUAGE RecordWildCards #-}
 
-import Control.Monad (mapM, forM, void, filterM)
+import Control.Monad as CM (mapM, forM, void, filterM)
 import Data.Char (isSpace)
 import Data.List (find, isSuffixOf, nub, sort, intercalate, isPrefixOf)
 import Data.Maybe (fromJust, catMaybes)
 import Data.Monoid (Monoid(..))
+import Data.Traversable (Traversable(..))
 import System.FilePath (FilePath, (</>), takeDirectory, isAbsolute, splitFileName)
-import System.Directory (getCurrentDirectory, getDirectoryContents, doesFileExist)
+import System.Directory (getCurrentDirectory, getDirectoryContents, doesFileExist, canonicalizePath)
 import System.Environment (getArgs)
 
 import GHC
@@ -29,11 +30,11 @@ import Distribution.Version (Version(..))
 
 absoluteFilePath :: FilePath -> IO FilePath
 absoluteFilePath path = do
-  if not $ isAbsolute path
-  then return path
+  if isAbsolute path
+  then canonicalizePath path
   else do
     dir <- getCurrentDirectory
-    return $ dir </> path
+    canonicalizePath $ dir </> path
                  
 
 findCabalConfig :: FilePath -> IO (Maybe FilePath)
@@ -185,7 +186,7 @@ componentGhcSession lbi ghcVersion c = do
 hasSourceFileDependency :: Ghc () -> FilePath -> IO Bool
 hasSourceFileDependency s sourcePath = do
   graph <- runGhc (Just GHC.Paths.libdir) $ s >> GHC.depanal [] False
-  let dependencies = catMaybes $ map (ml_hs_file . ms_location) graph
+  dependencies <- traverse absoluteFilePath $ catMaybes $ map (ml_hs_file . ms_location) graph
   return $ sourcePath `elem` dependencies
 
 
@@ -226,7 +227,7 @@ main = do
               let components = allComponentsBy (localPkgDescr lbi) id
 
 
-              componentSessions <- flip mapM components $ \c -> do
+              componentSessions <- flip CM.mapM components $ \c -> do
                 session <- componentGhcSession lbi ghcVersion c
                 return (c, session)
 
@@ -237,8 +238,10 @@ main = do
               void $ forM componentSessions $ \(c, s) -> do
                 graph <- runGhc (Just GHC.Paths.libdir) $ s >> GHC.depanal [] False
                 putStrLn $ show $ componentName c
-                putStrLn $ show $ catMaybes $ map (ml_hs_file . ms_location) graph
+                paths <- traverse absoluteFilePath $ catMaybes . map (ml_hs_file . ms_location) $ graph
+                putStrLn $ show paths
 
+              putStrLn $ "Matching component:"
               matchingComponents <- fmap (map fst) $ filterM (flip hasSourceFileDependency sourceFile . snd) componentSessions
               case matchingComponents of
                 [] -> putStrLn $ "Can't find module that depends on " ++ show sourceFile
